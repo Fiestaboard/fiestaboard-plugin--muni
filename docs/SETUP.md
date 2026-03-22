@@ -145,7 +145,7 @@ Access individual stops using index (0-3):
 
 ## Example Templates
 
-![Muni Transit Display](./muni-display.png)
+![Muni Transit Display](./board-display.png)
 
 ### Simple Single Stop
 
