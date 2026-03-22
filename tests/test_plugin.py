@@ -1,9 +1,11 @@
 """Tests for Muni transit data source."""
 
+import json
+from pathlib import Path
+
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime, timezone, timedelta
-import json
 
 from src.utils.muni import MuniSource, get_muni_source, COLOR_RED, COLOR_ORANGE
 
@@ -875,4 +877,71 @@ class TestMuniPluginClass:
         plugin.cleanup()
         assert plugin._cache is None
         assert plugin._transit_cache is None
+
+
+class TestManifestMetadata:
+    """Validate manifest.json rich variable metadata."""
+
+    @pytest.fixture(autouse=True)
+    def load_manifest(self):
+        manifest_path = Path(__file__).resolve().parent.parent / "manifest.json"
+        with open(manifest_path) as f:
+            self.manifest = json.load(f)
+        self.variables = self.manifest["variables"]
+
+    def test_required_top_level_fields(self):
+        for field in ("id", "name", "version", "variables"):
+            assert field in self.manifest, f"Missing top-level field: {field}"
+
+    def test_simple_is_dict(self):
+        assert isinstance(self.variables["simple"], dict), (
+            "variables.simple must be a dict, not a list"
+        )
+
+    def test_simple_vars_have_metadata(self):
+        required_keys = {"description", "type", "example"}
+        for var_name, meta in self.variables["simple"].items():
+            missing = required_keys - set(meta.keys())
+            assert not missing, (
+                f"Simple var '{var_name}' missing keys: {missing}"
+            )
+
+    def test_simple_vars_have_group(self):
+        groups = self.variables.get("groups", {})
+        for var_name, meta in self.variables["simple"].items():
+            grp = meta.get("group")
+            assert grp, f"Simple var '{var_name}' has no group"
+            assert grp in groups, (
+                f"Simple var '{var_name}' references unknown group '{grp}'"
+            )
+
+    def test_groups_defined(self):
+        groups = self.variables.get("groups", {})
+        assert len(groups) >= 1, "At least one group must be defined"
+        for gid, gmeta in groups.items():
+            assert "label" in gmeta, f"Group '{gid}' missing 'label'"
+
+    def test_arrays_preserved(self):
+        arrays = self.variables.get("arrays", {})
+        assert "stops" in arrays
+        stops = arrays["stops"]
+        assert "item_fields" in stops
+        assert "label_field" in stops
+
+    def test_sub_arrays_preserved(self):
+        stops = self.variables["arrays"]["stops"]
+        sub = stops.get("sub_arrays", {})
+        assert "lines" in sub, "sub_arrays.lines must be present"
+        lines = sub["lines"]
+        assert lines["key_type"] == "dynamic"
+        assert "key_field" in lines
+        assert "item_fields" in lines
+
+    def test_max_lengths_use_dot_star_notation(self):
+        ml = self.manifest.get("max_lengths", {})
+        assert ml, "max_lengths must be present"
+        for key in ml:
+            assert "." in key, (
+                f"max_lengths key '{key}' should use dot-star notation"
+            )
 
