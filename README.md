@@ -1,6 +1,6 @@
 # SF Muni Plugin
 
-![SF Muni Display](./docs/muni-display.png)
+![SF Muni Display](./docs/board-display.png)
 
 Display San Francisco Muni transit arrival times with multi-stop and multi-line support.
 
