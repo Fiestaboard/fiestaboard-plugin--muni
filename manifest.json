@@ -1,7 +1,7 @@
 {
   "id": "muni",
   "name": "SF Muni",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Display San Francisco Muni transit arrival times with multi-line support",
   "author": "FiestaBoard Team",
   "repository": "https://github.com/Fiestaboard/fiestaboard-plugin--muni",
@@ -173,5 +173,43 @@
       "caption": "Display San Francisco Muni transit arrival times with multi-line support",
       "primary": true
     }
-  ]
+  ],
+  "demo": {
+    "name": "Muni Arrivals Demo",
+    "device_type": "flagship",
+    "template": [
+      "Muni Arrivals",
+      "{{muni.stop_name}}",
+      "{{muni.formatted}}",
+      "",
+      "",
+      "Stops {{muni.stop_count}}"
+    ],
+    "line_metadata": [
+      {
+        "alignment": "center",
+        "wrap": false
+      },
+      {
+        "alignment": "center",
+        "wrap": false
+      },
+      {
+        "alignment": "left",
+        "wrap": true
+      },
+      {
+        "alignment": "left",
+        "wrap": false
+      },
+      {
+        "alignment": "left",
+        "wrap": false
+      },
+      {
+        "alignment": "center",
+        "wrap": false
+      }
+    ]
+  }
 }
