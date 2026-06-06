@@ -226,7 +226,7 @@ class MuniPlugin(PluginBase):
         
         return {
             "stop_code": stop_code,
-            "stop_name": stop_name[:15] if stop_name else stop_code,
+            "stop_name": stop_name if stop_name else stop_code,
             "lines": lines,
             "all_lines": {
                 "formatted": all_formatted,
