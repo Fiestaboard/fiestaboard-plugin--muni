@@ -174,6 +174,28 @@
       "primary": true
     }
   ],
+  "teaser": "N JUDAH 3 MIN",
+  "previews": [
+    {
+      "device_type": "flagship",
+      "rows": [
+        "{67}{67}{67}{67}{67}{67}{67}{67}{67}{67}{67}{67}{67}{67}{67}{67}{67}{67}{67}{67}{67}{67}",
+        "N JUDAH  CHURCH  3 MIN",
+        "N JUDAH  CHURCH 12 MIN",
+        "7 HAIGHT DUBOCE  8 MIN",
+        "38 GEARY POWELL  5 MIN",
+        "38 GEARY POWELL 14 MIN"
+      ]
+    },
+    {
+      "device_type": "note",
+      "rows": [
+        "{63}{63} MUNI",
+        "N JUDAH  3 MIN",
+        "KT INGLE 8 MIN"
+      ]
+    }
+  ],
   "demo": {
     "flagship": {
       "name": "Muni Arrivals Demo",
