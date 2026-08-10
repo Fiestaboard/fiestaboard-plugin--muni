@@ -1,7 +1,7 @@
 {
   "id": "muni",
   "name": "SF Muni",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "Display San Francisco Muni transit arrival times with multi-line support",
   "author": "FiestaBoard Team",
   "repository": "https://github.com/Fiestaboard/fiestaboard-plugin--muni",
@@ -23,15 +23,40 @@
         "description": "Get free key at 511.org/developers",
         "ui:widget": "password"
       },
+      "route": {
+        "type": "string",
+        "title": "Route Filter",
+        "description": "Narrow the stop list to one Muni route while you pick. Leave empty to search every stop.",
+        "ui:widget": "remote-options",
+        "ui:options": {
+          "options_id": "routes",
+          "searchable": true,
+          "cache_seconds": 3600,
+          "placeholder": "All routes"
+        }
+      },
       "stop_codes": {
         "type": "array",
-        "title": "Stop Codes",
-        "description": "Muni stop codes to monitor (max 4)",
+        "title": "Stops",
+        "description": "Muni stops to monitor (max 4)",
         "maxItems": 4,
         "items": {
           "type": "string"
         },
-        "ui:widget": "muni-stop-picker"
+        "ui:widget": "remote-options",
+        "ui:options": {
+          "options_id": "stops",
+          "depends_on": [
+            "route"
+          ],
+          "multiple": true,
+          "reorderable": true,
+          "searchable": true,
+          "server_search": true,
+          "allow_custom": true,
+          "cache_seconds": 900,
+          "placeholder": "Search stops by name"
+        }
       },
       "refresh_seconds": {
         "type": "integer",
@@ -165,7 +190,7 @@
       ]
     }
   },
-  "fiestaboard_version": ">=2.10.0",
+  "fiestaboard_version": ">=8.24.2",
   "screenshots": [
     {
       "src": "docs/board-display.png",

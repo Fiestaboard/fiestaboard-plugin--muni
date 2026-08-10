@@ -4,16 +4,71 @@ Displays Muni transit arrival times with support for multiple stops and lines.
 """
 
 from typing import Any, Dict, List, Optional
+import json
 import logging
+import re
+import threading
+import time
 from datetime import datetime, timezone
 
-from src.plugins.base import PluginBase, PluginResult
+import requests
+
+from src.plugins.base import (
+    Option,
+    OptionsRequest,
+    OptionsResult,
+    OptionsUnavailable,
+    PluginBase,
+    PluginResult,
+)
 
 logger = logging.getLogger(__name__)
 
 # Colors
 COLOR_RED = 63
 COLOR_ORANGE = 64
+
+# 511.org catalog endpoints. The plugin's live arrivals come from the shared
+# regional transit cache; the picker needs the *catalog* instead, which the
+# cache does not carry, so it reads the same host with the same credential.
+STOPS_API_URL = "http://api.511.org/transit/stops"
+LINES_API_URL = "http://api.511.org/transit/lines"
+OPERATOR_ID = "SF"
+
+# The picker runs while a settings dialog is open, so the call has to give up
+# long before the user does.
+OPTIONS_TIMEOUT_SECONDS = 10
+
+# "Church St & Duboce Ave", "Judah St/9th Ave", "3rd St at Palou Ave" -- 511
+# names a stop after the pair of streets that meet there.
+_CROSS_STREET_RE = re.compile(r"\s*(?:&|/|\bat\b)\s*", re.IGNORECASE)
+
+
+# Core dispatches get_options into a throwaway instance, so anything cached on
+# ``self`` is thrown away with it. The stop and route catalogs change on the
+# order of service changes, not minutes, so they live here instead -- keyed by
+# credential so two installs never read each other's list.
+_CATALOG_TTL_SECONDS = 6 * 60 * 60
+_catalog_cache: Dict[tuple, tuple] = {}
+_catalog_cache_lock = threading.Lock()
+
+
+def _catalog_get(key: tuple) -> Optional[List[Dict[str, Any]]]:
+    """Return the cached catalog for *key*, or None when absent or stale."""
+    with _catalog_cache_lock:
+        entry = _catalog_cache.get(key)
+    if not entry:
+        return None
+    fetched_at, value = entry
+    if time.monotonic() - fetched_at > _CATALOG_TTL_SECONDS:
+        return None
+    return value
+
+
+def _catalog_put(key: tuple, value: List[Dict[str, Any]]) -> None:
+    """Remember *value* as the catalog for *key*."""
+    with _catalog_cache_lock:
+        _catalog_cache[key] = (time.monotonic(), value)
 
 
 class MuniPlugin(PluginBase):
@@ -309,6 +364,245 @@ class MuniPlugin(PluginBase):
             logger.exception("Error fetching Muni data")
             return PluginResult(available=False, error=str(e))
     
+    # ------------------------------------------------------------------
+    # Settings picker (remote-options)
+    # ------------------------------------------------------------------
+
+    def get_options(self, request: OptionsRequest) -> OptionsResult:
+        """Browse the 511.org catalog so the user can pick stops by name."""
+        api_key = str(self.config.get("api_key") or "").strip()
+        if not api_key:
+            raise OptionsUnavailable("Add your 511.org API key first — the stop list comes from 511.org.")
+
+        if request.options_id == "stops":
+            route = str((request.parent or {}).get("route") or "").strip()
+            options = self._stop_options(self._fetch_stop_catalog(api_key, route))
+        elif request.options_id == "routes":
+            options = self._route_options(api_key)
+        else:
+            raise NotImplementedError(request.options_id)
+
+        matches = self._apply_query(options, request.query)
+
+        # ``total`` describes the answer to *this* question, so a search that
+        # narrows 3,000 stops to 12 reports 12 rather than the catalog size.
+        limit = request.limit if request.limit and request.limit > 0 else len(matches)
+        page = matches[:limit]
+        return OptionsResult(options=page, has_more=len(matches) > len(page), total=len(matches))
+
+    @staticmethod
+    def _apply_query(options: List[Option], query: str) -> List[Option]:
+        """Keep the options whose label or stored value contains *query*.
+
+        Matching is case-insensitive: people type "church", not "Church St".
+        """
+        needle = (query or "").strip().lower()
+        if not needle:
+            return options
+        return [
+            option
+            for option in options
+            if needle in option.label.lower() or needle in str(option.value).lower()
+        ]
+
+    def _stop_options(self, entries: List[Dict[str, Any]]) -> List[Option]:
+        """Turn catalog entries into options a human can tell apart.
+
+        The stop code alone is what the board needs, but it is exactly what the
+        user cannot recognise, so the name leads and the code backs it up. San
+        Francisco names both kerbs of an intersection identically, so twins get
+        the side of the street they sit on as well.
+        """
+        twins: Dict[str, List[Dict[str, Any]]] = {}
+        for entry in entries:
+            twins.setdefault(entry["name"].casefold(), []).append(entry)
+
+        options = []
+        for entry in entries:
+            description = f"Stop {entry['stop_code']}"
+            siblings = twins[entry["name"].casefold()]
+            side = self._side_of_street(entry, siblings) if len(siblings) > 1 else None
+            if side:
+                description = f"{description} · {side} side"
+            options.append(
+                Option(
+                    value=entry["stop_code"],
+                    label=entry["name"],
+                    description=description,
+                    group=self._primary_street(entry["name"]),
+                )
+            )
+        return options
+
+    @staticmethod
+    def _primary_street(name: str) -> Optional[str]:
+        """The street a stop is filed under -- the first half of "A St & B St"."""
+        head = _CROSS_STREET_RE.split(name, maxsplit=1)[0].strip()
+        return head or name.strip() or None
+
+    @staticmethod
+    def _side_of_street(entry: Dict[str, Any], siblings: List[Dict[str, Any]]) -> Optional[str]:
+        """Which side of the intersection *entry* sits on, versus its twins.
+
+        Compares the stop against the centre of the identically-named group, so
+        the two kerbs of "Church St & Duboce Ave" read "north side" and "south
+        side" instead of looking like a duplicate row.
+        """
+        located = [s for s in siblings if s.get("lat") is not None and s.get("lon") is not None]
+        if entry.get("lat") is None or entry.get("lon") is None or len(located) < 2:
+            return None
+
+        centre_lat = sum(s["lat"] for s in located) / len(located)
+        centre_lon = sum(s["lon"] for s in located) / len(located)
+        # Degrees of longitude are shorter than degrees of latitude at this
+        # latitude; scale before comparing so the dominant axis is the real one.
+        north = entry["lat"] - centre_lat
+        east = (entry["lon"] - centre_lon) * 0.79
+        if not north and not east:
+            return None
+        if abs(north) >= abs(east):
+            return "north" if north > 0 else "south"
+        return "east" if east > 0 else "west"
+
+    def _route_options(self, api_key: str) -> List[Option]:
+        """Every Muni route, as options that scope the stop list."""
+        entries = self._fetch_route_catalog(api_key)
+        return [
+            Option(value=entry["route_id"], label=entry["label"], group=entry["mode"])
+            for entry in entries
+        ]
+
+    def _fetch_route_catalog(self, api_key: str) -> List[Dict[str, Any]]:
+        """Return every Muni route 511.org publishes."""
+        key = ("routes", "", api_key)
+        cached = _catalog_get(key)
+        if cached is not None:
+            return cached
+
+        params = {
+            "api_key": api_key,
+            "operator_id": OPERATOR_ID,
+            "format": "json",
+        }
+        data = self._get_511_json(LINES_API_URL, params)
+
+        entries = []
+        for line in self._line_entries(data):
+            route_id = str(line.get("Id") or line.get("id") or "")
+            if not route_id:
+                continue
+            public_code = str(line.get("PublicCode") or route_id)
+            name = str(line.get("Name") or "").strip()
+            label = f"{public_code} — {name}" if name and name != public_code else public_code
+            entries.append({"route_id": route_id, "label": label, "mode": self._mode_label(line)})
+        _catalog_put(key, entries)
+        return entries
+
+    @staticmethod
+    def _mode_label(line: Dict[str, Any]) -> Optional[str]:
+        """Muni's rail lines and its bus lines are picked from different mental lists."""
+        mode = str(line.get("TransportMode") or "").lower()
+        if not mode:
+            return None
+        if mode in ("tram", "rail", "metro", "funicular"):
+            return "Metro & streetcar"
+        if mode in ("bus", "trolleybus", "coach"):
+            return "Bus"
+        return mode.capitalize()
+
+    @staticmethod
+    def _line_entries(data: Any) -> List[Dict[str, Any]]:
+        """Pull the Line records out of whichever envelope 511.org used."""
+        if isinstance(data, list):
+            return [line for line in data if isinstance(line, dict)]
+        if isinstance(data, dict):
+            content = data.get("content")
+            if isinstance(content, list):
+                return [line for line in content if isinstance(line, dict)]
+        return []
+
+    def _fetch_stop_catalog(self, api_key: str, route: str = "") -> List[Dict[str, Any]]:
+        """Return the SF Muni stops on *route*, or every stop when it is empty."""
+        cached = _catalog_get(("stops", route, api_key))
+        if cached is not None:
+            return cached
+
+        params = {
+            "api_key": api_key,
+            "operator_id": OPERATOR_ID,
+            "format": "json",
+        }
+        if route:
+            params["line_id"] = route
+        data = self._get_511_json(STOPS_API_URL, params)
+
+        points = data.get("Contents", {}).get("dataObjects", {}).get("ScheduledStopPoint", [])
+        if isinstance(points, dict):
+            # A collection of one comes back unwrapped from 511's XML-to-JSON
+            # conversion, which is exactly what a narrow route filter returns.
+            points = [points]
+
+        entries = []
+        for point in points:
+            stop_id = str(point.get("id") or "")
+            # 511 ids arrive as "SF_15726" for some feeds and bare "15726" for
+            # others; StopMonitoring only ever accepts the bare code.
+            stop_code = stop_id.split("_")[-1]
+            if not stop_code:
+                continue
+            location = point.get("Location") or {}
+            entries.append(
+                {
+                    "stop_code": stop_code,
+                    "name": str(point.get("Name") or stop_code),
+                    "lat": self._as_float(location.get("Latitude")),
+                    "lon": self._as_float(location.get("Longitude")),
+                }
+            )
+        # Alphabetical, because the picker is scanned by eye and 511 returns
+        # the catalog in feed order.
+        entries.sort(key=lambda entry: (entry["name"].casefold(), entry["stop_code"]))
+        _catalog_put(("stops", route, api_key), entries)
+        return entries
+
+    @staticmethod
+    def _as_float(value: Any) -> Optional[float]:
+        """511 sends coordinates as strings, and sometimes not at all."""
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _get_511_json(url: str, params: Dict[str, Any]) -> Any:
+        """GET *url* from 511.org and decode its (occasionally BOM-prefixed) JSON.
+
+        Everything 511.org can do to us here -- reject the key, rate-limit us,
+        time out, answer with something that is not JSON -- is a "cannot answer
+        right now", not a bug in the plugin, so it comes back as
+        :class:`OptionsUnavailable` and the settings form shows a hint.
+        """
+        try:
+            response = requests.get(url, params=params, timeout=OPTIONS_TIMEOUT_SECONDS)
+            response.raise_for_status()
+            content = response.text
+        except requests.exceptions.HTTPError as exc:
+            status = getattr(exc.response, "status_code", None)
+            if status in (401, 403):
+                raise OptionsUnavailable("511.org rejected that API key — check it and try again.") from exc
+            if status == 429:
+                raise OptionsUnavailable("511.org is rate-limiting this key — try again in a minute.") from exc
+            raise OptionsUnavailable(f"511.org returned an error ({status}) — try again shortly.") from exc
+        except requests.exceptions.RequestException as exc:
+            raise OptionsUnavailable("Could not reach 511.org — try again shortly.") from exc
+
+        if content.startswith("\ufeff"):
+            content = content[1:]
+        try:
+            return json.loads(content)
+        except ValueError as exc:
+            raise OptionsUnavailable("511.org sent a response this plugin could not read.") from exc
+
     def cleanup(self) -> None:
         """Cleanup resources."""
         self._transit_cache = None
