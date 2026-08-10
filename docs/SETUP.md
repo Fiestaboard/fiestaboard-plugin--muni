@@ -1,6 +1,6 @@
 # SF Muni Transit Setup Guide
 
-SF Muni integration provides real-time arrival predictions for San Francisco Municipal Railway (Muni) bus, light rail, and cable car lines. The visual stop finder makes it easy to find and monitor stops near your locations.
+SF Muni integration provides real-time arrival predictions for San Francisco Municipal Railway (Muni) bus, light rail, and cable car lines. Stops are chosen from a searchable picker backed by the live 511.org catalog, so you never have to look up a numeric stop code.
 
 ## Overview
 
@@ -8,7 +8,7 @@ SF Muni integration provides real-time arrival predictions for San Francisco Mun
 - Real-time arrival predictions for Muni lines
 - Track multiple stops simultaneously (up to 4)
 - Line filtering (e.g., show only N-Judah)
-- Visual stop finder with address/location search
+- Searchable stop picker, optionally narrowed to a single route
 - Regional transit caching for fast responses
 
 **Use Cases:**
@@ -21,7 +21,7 @@ SF Muni integration provides real-time arrival predictions for San Francisco Mun
 
 - ✅ Free 511.org API key (required)
 - ✅ Muni stops in San Francisco area
-- ✅ Web UI access for stop finder
+- ✅ Web UI access for the stop picker
 
 ## Quick Setup
 
@@ -55,48 +55,39 @@ MUNI_API_KEY=your_511_org_api_key_here
 MUNI_REFRESH_SECONDS=60  # Optional: refresh interval (default: 60)
 ```
 
-### 3. Add Stops Using Stop Finder
+### 3. Add Stops Using the Stop Picker
 
-The web UI provides a visual stop finder:
+The **Stops** setting is a searchable picker backed by the live 511.org stop
+catalog — there is no need to look up numeric stop codes anywhere else.
 
 1. Go to the **Muni Transit** plugin on the **Integrations** page
-2. Click **Find Stops** button
-3. Use one of three methods to find stops:
+2. Make sure your 511.org API key is saved first — the catalog is fetched with
+   your key, and until there is one the picker shows
+   "Add your 511.org API key first"
+3. **Optional:** choose a **Route Filter**, e.g. `N — JUDAH`
+   - Narrows the stop list to the stops that route serves
+   - Leave it empty to search every Muni stop
+   - It only scopes the picker; the board still shows every line at the stops
+     you select
+4. Type in the **Stops** field to search by name ("church", "judah", "geary")
+   - Each option shows the stop name, its stop code, and the side of the street
+     when two stops share a name:
 
-**Method A: Search by Address**
-```
-Enter address: "Market St & 9th St, San Francisco"
-→ Shows nearby stops within 0.5km
-```
+     ```
+     Church St & Duboce Ave
+     Stop 15726 · north side
 
-**Method B: Use Current Location**
-```
-Click "Use My Location"
-→ Browser requests location permission
-→ Shows stops near you
-```
+     Church St & Duboce Ave
+     Stop 15727 · south side
+     ```
 
-**Method C: Enter Coordinates**
-```
-Latitude: 40.7128
-Longitude: -74.0060
-→ Shows nearby stops
-```
+   - Options are grouped by the street the stop is on
+5. **Select up to 4 stops**, and drag them into the order you want them shown
+6. **Save** your configuration
 
-4. **Select stops** from the results (up to 4)
-   - Each stop shows:
-     - Stop name
-     - Stop code (used by 511 API)
-     - Lines serving this stop
-     - Distance from search location
-
-5. Click **Add Stop** for each one you want to monitor
-
-6. **Optional:** Configure line filters
-   - To show only specific lines (e.g., "N-Judah")
-   - Leave blank to show all lines at that stop
-
-7. **Save** your configuration
+Stop codes saved before the picker existed are unchanged and still valid — the
+setting stores the same plain stop codes it always did, and a code you already
+know can still be entered directly.
 
 ### 4. Create a Page to Display Muni Data
 
@@ -286,7 +277,7 @@ Returns:
 ### Choosing Stops
 
 1. **Identify your key locations**: Home, work, gym, favorite spots
-2. **Find nearest stops**: Use stop finder with your addresses
+2. **Find nearest stops**: Search the stop picker by street name, or pick the route first
 3. **Check line coverage**: Ensure stops serve your needed lines
 4. **Consider direction**: Some stops have separate codes for inbound/outbound
 
@@ -316,15 +307,18 @@ Use short, recognizable names:
 
 ## Troubleshooting
 
-### No Stops Showing in Finder
+### No Stops Showing in the Picker
 
-**Problem:** Stop finder returns no results
+**Problem:** The stop picker is empty or shows a hint instead of stops
 
 **Solutions:**
-1. **Increase search radius**: Try 1km instead of 0.5km
-2. **Check location**: Ensure you're in San Francisco area
-3. **Verify API key**: Test with 511.org API directly
-4. **Check stop database**: Some stops may not have coordinates
+1. **Save the API key first**: "Add your 511.org API key first" means the key
+   has not been stored yet — the catalog is fetched with your key
+2. **Check the key**: "511.org rejected that API key" means the key is wrong or
+   expired; test it with the 511 API directly
+3. **Clear the route filter**: A route filter only shows the stops on that route
+4. **Wait a moment**: "511.org is rate-limiting this key" clears on its own —
+   the free tier allows 60 requests per hour
 
 ### API Rate Limit Errors
 
@@ -342,7 +336,7 @@ Use short, recognizable names:
 
 **Solutions:**
 1. **Check time of day**: Service may not be running (late night/early morning)
-2. **Verify stop code**: Re-add stop using stop finder
+2. **Verify stop code**: Re-add the stop from the stop picker
 3. **Check line filter**: Remove filters to see all lines
 4. **Review logs**: Look for 511 API errors
 5. **Test 511 API directly**: 
@@ -473,7 +467,7 @@ Common Muni line codes for filtering:
 **Next Steps:**
 1. Get your free 511.org API key
 2. Enable Muni Transit in Settings
-3. Use stop finder to add your frequent stops
+3. Use the stop picker to add your frequent stops
 4. Create a page with arrival predictions
 5. Set as active page or combine with other transit data
 

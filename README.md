@@ -99,19 +99,36 @@ L: {{muni.stops.0.lines.L.next_arrival}} min
 |---------|------|----------|-------------|
 | enabled | boolean | No | Enable/disable the plugin |
 | api_key | string | Yes | 511.org API key |
-| stop_codes | array | Yes | Muni stop codes (max 4) |
+| route | string | No | Narrows the stop picker to one route; does not filter the board |
+| stop_codes | array | Yes | Muni stop codes (max 4), chosen in the stop picker |
 | refresh_seconds | integer | No | Update interval (default: 60) |
 
-## Finding Stop Codes
+## Choosing Stops
 
-Use the stop search feature in the UI to find stops by:
-- Street intersection
-- Station name
-- Coordinates
+Stops are picked from a searchable list, not typed in by hand. The settings
+form asks the plugin for the live 511.org catalog, so the list is whatever SF
+Muni is running today.
 
-Common stop codes:
-- `15726` - Church St & Duboce Ave (Outbound)
-- `15727` - Church St & Duboce Ave (Inbound)
+1. Enter your 511.org API key and save — the catalog is fetched with your key,
+   so the picker stays empty until there is one.
+2. Optionally pick a **Route Filter** (for example `N — JUDAH`) to narrow the
+   list to the stops on that line. Leave it empty to search all of Muni.
+3. Search the **Stops** field by name ("church", "judah") and select up to four.
+   Each option shows the stop name, its stop code, and — where San Francisco
+   has named both kerbs of an intersection identically — which side of the
+   street it is on:
+
+   ```
+   Church St & Duboce Ave
+   Stop 15726 · north side
+
+   Church St & Duboce Ave
+   Stop 15727 · south side
+   ```
+
+The value saved is still the plain stop code, so configurations created before
+the picker existed keep working untouched, and a known code can still be typed
+in directly.
 
 ## Muni Lines
 
