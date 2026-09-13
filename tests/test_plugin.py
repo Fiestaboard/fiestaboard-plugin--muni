@@ -878,6 +878,24 @@ class TestMuniPluginClass:
         assert plugin._cache is None
         assert plugin._transit_cache is None
 
+    def test_config_change_reconfigures_transit_cache(self, plugin):
+        """Test a config change makes the next lookup reconfigure the shared cache."""
+        mock_cache = Mock()
+        mock_cache.is_ready.return_value = True
+
+        with patch('src.utils.transit_cache.get_transit_cache', return_value=mock_cache):
+            plugin.config = {"api_key": "old_key", "stop_codes": ["12345"]}
+            plugin._get_transit_cache()
+            assert mock_cache.configure.call_count == 1
+
+            # New credential: the memoized reference must not survive
+            plugin.config = {"api_key": "new_key", "stop_codes": ["12345"]}
+            assert plugin._transit_cache is None
+
+            plugin._get_transit_cache()
+            assert mock_cache.configure.call_count == 2
+            assert mock_cache.configure.call_args.kwargs["api_key"] == "new_key"
+
 
 class TestManifestMetadata:
     """Validate manifest.json rich variable metadata."""

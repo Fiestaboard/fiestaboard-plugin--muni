@@ -114,6 +114,18 @@ class MuniPlugin(PluginBase):
         
         return errors
     
+    def on_config_change(self, old_config: Dict[str, Any], new_config: Dict[str, Any]) -> None:
+        """Forget the transit cache so a config change takes effect immediately.
+        
+        _get_transit_cache() only calls configure() when it has no cache yet,
+        so without this a change to `api_key` or `refresh_seconds` would never
+        reach the shared TransitCache -- it would keep polling 511.org with
+        the old credential. Dropping the reference makes the next call
+        reconfigure it.
+        """
+        self._transit_cache = None
+        logger.debug("Dropped transit cache reference after config change")
+    
     def _get_transit_cache(self):
         """Get or initialize transit cache."""
         if self._transit_cache is not None:
