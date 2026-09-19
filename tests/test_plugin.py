@@ -1,653 +1,213 @@
-"""Tests for Muni transit data source."""
+"""Tests for MuniPlugin — this repository's plugin class.
+
+These tests exercise ``__init__.py`` in this repo (imported as ``plugins.muni``
+via the symlink CI creates). They deliberately do *not* import
+``src.utils.muni`` or ``MessageFormatter.format_muni``: those were the
+platform's pre-extraction copies of this logic, FiestaBoard has deleted them,
+and testing them here proved nothing about this repository.
+"""
 
 import json
 from pathlib import Path
 
 import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 from datetime import datetime, timezone, timedelta
 
-from src.utils.muni import MuniSource, get_muni_source, COLOR_RED, COLOR_ORANGE
+from plugins.muni import COLOR_RED, MuniPlugin, Plugin
 
 
-class TestMuniSourceParsing:
-    """Tests for Muni API response parsing."""
-    
-    @pytest.fixture
-    def muni_source(self):
-        """Create a MuniSource instance for testing."""
-        return MuniSource(
-            api_key="test_api_key",
-            stop_codes=["15726"],
-            line_name="N"
-        )
-    
-    @pytest.fixture
-    def sample_api_response(self):
-        """Sample 511.org StopMonitoring API response."""
-        # Calculate future times for arrivals
-        now = datetime.now(timezone.utc)
-        arrival1 = (now + timedelta(minutes=4)).isoformat()
-        arrival2 = (now + timedelta(minutes=12)).isoformat()
-        arrival3 = (now + timedelta(minutes=19)).isoformat()
-        
-        return {
-            "ServiceDelivery": {
-                "StopMonitoringDelivery": {
-                    "MonitoredStopVisit": [
-                        {
-                            "MonitoredVehicleJourney": {
-                                "PublishedLineName": "N",
-                                "Occupancy": "MANY_SEATS",
-                                "MonitoredCall": {
-                                    "StopPointName": "Church St & Duboce Ave",
-                                    "ExpectedArrivalTime": arrival1,
-                                }
-                            }
-                        },
-                        {
-                            "MonitoredVehicleJourney": {
-                                "PublishedLineName": "N",
-                                "Occupancy": "FEW_SEATS",
-                                "MonitoredCall": {
-                                    "StopPointName": "Church St & Duboce Ave",
-                                    "ExpectedArrivalTime": arrival2,
-                                }
-                            }
-                        },
-                        {
-                            "MonitoredVehicleJourney": {
-                                "PublishedLineName": "N",
-                                "Occupancy": "STANDING",
-                                "MonitoredCall": {
-                                    "StopPointName": "Church St & Duboce Ave",
-                                    "ExpectedArrivalTime": arrival3,
-                                }
-                            }
-                        },
-                    ]
-                }
-            }
+MANIFEST = {"id": "muni", "name": "SF Muni", "version": "1.0.0"}
+RED_TILE = f"{{{COLOR_RED}}}"
+
+
+def _visit(line="N", minutes=5, stop_name="Church St & Duboce Ave", occupancy="MANY_SEATS", **journey):
+    """One 511 StopMonitoring visit, as the transit cache hands it to the plugin."""
+    # Half a minute of slack: the plugin truncates, so a stamp made a few
+    # milliseconds before the assertion would otherwise read one minute short.
+    arrival = (datetime.now(timezone.utc) + timedelta(minutes=minutes, seconds=30)).isoformat()
+    return {
+        "MonitoredVehicleJourney": {
+            "PublishedLineName": line,
+            "Occupancy": occupancy,
+            "MonitoredCall": {"StopPointName": stop_name, "ExpectedArrivalTime": arrival},
+            **journey,
         }
-    
+    }
+
+
+def _ready_cache(stops):
+    """A transit cache that is up and answers ``get_stops_data`` with ``stops``."""
+    cache = Mock()
+    cache.is_ready.return_value = True
+    cache.get_stops_data.return_value = stops
+    return cache
+
+
+class TestPluginIdentity:
+    def test_module_exports_plugin_alias(self):
+        """The loader imports the module and looks for ``Plugin``."""
+        assert Plugin is MuniPlugin
+
+
+class TestParseStopData:
+    """What one stop's visits turn into -- including the board text itself.
+
+    The ``formatted`` strings are what templates put on the board, so their
+    exact shape is the contract here.
+    """
+
     @pytest.fixture
-    def delayed_api_response(self):
-        """Sample API response with delay status."""
-        now = datetime.now(timezone.utc)
-        arrival1 = (now + timedelta(minutes=7)).isoformat()
-        arrival2 = (now + timedelta(minutes=15)).isoformat()
-        
-        return {
-            "ServiceDelivery": {
-                "StopMonitoringDelivery": {
-                    "MonitoredStopVisit": [
-                        {
-                            "MonitoredVehicleJourney": {
-                                "PublishedLineName": "N",
-                                "Occupancy": "MANY_SEATS",
-                                "Delay": "PT5M",  # 5 minute delay
-                                "MonitoredCall": {
-                                    "StopPointName": "Church St & Duboce Ave",
-                                    "ExpectedArrivalTime": arrival1,
-                                }
-                            }
-                        },
-                        {
-                            "MonitoredVehicleJourney": {
-                                "PublishedLineName": "N",
-                                "Occupancy": "STANDING",
-                                "MonitoredCall": {
-                                    "StopPointName": "Church St & Duboce Ave",
-                                    "ExpectedArrivalTime": arrival2,
-                                }
-                            }
-                        },
-                    ]
-                }
-            }
-        }
-    
-    @pytest.fixture
-    def full_occupancy_response(self):
-        """Sample API response with FULL occupancy."""
-        now = datetime.now(timezone.utc)
-        arrival1 = (now + timedelta(minutes=3)).isoformat()
-        arrival2 = (now + timedelta(minutes=10)).isoformat()
-        
-        return {
-            "ServiceDelivery": {
-                "StopMonitoringDelivery": {
-                    "MonitoredStopVisit": [
-                        {
-                            "MonitoredVehicleJourney": {
-                                "PublishedLineName": "N",
-                                "Occupancy": "FULL",
-                                "MonitoredCall": {
-                                    "StopPointName": "Church St & Duboce Ave",
-                                    "ExpectedArrivalTime": arrival1,
-                                }
-                            }
-                        },
-                        {
-                            "MonitoredVehicleJourney": {
-                                "PublishedLineName": "N",
-                                "Occupancy": "FEW_SEATS",
-                                "MonitoredCall": {
-                                    "StopPointName": "Church St & Duboce Ave",
-                                    "ExpectedArrivalTime": arrival2,
-                                }
-                            }
-                        },
-                    ]
-                }
-            }
-        }
-    
-    def test_parse_normal_response(self, muni_source, sample_api_response):
-        """Test parsing a normal API response without delays."""
-        result = muni_source._parse_response(sample_api_response)
-        
-        assert result is not None
-        assert result["line"] == "N-JUDAH"  # Display name, not raw code
-        assert result["stop_name"] == "Church St & Duboce Ave"
-        assert len(result["arrivals"]) == 3
+    def plugin(self):
+        return MuniPlugin(MANIFEST)
+
+    def test_formats_line_name_and_sorted_minutes(self, plugin):
+        visits = [_visit(minutes=12), _visit(minutes=4), _visit(minutes=19)]
+        result = plugin._parse_stop_data(visits, "15726")
+        assert result["formatted"] == "N-JUDAH: 4, 12, 19 MIN"
+        assert result["lines"]["N"]["next_arrival"] == 4
+
+    def test_keeps_only_the_next_three_arrivals(self, plugin):
+        visits = [_visit(minutes=m) for m in (2, 5, 8, 11)]
+        result = plugin._parse_stop_data(visits, "15726")
+        assert result["formatted"] == "N-JUDAH: 2, 5, 8 MIN"
+
+    def test_on_time_service_carries_no_red_tile(self, plugin):
+        result = plugin._parse_stop_data([_visit(minutes=4), _visit(minutes=12)], "15726")
         assert result["is_delayed"] is False
-        assert result["color_code"] == 0  # No special color
-        
-        # Check arrival times are reasonable (within a few minutes of expected)
-        for arrival in result["arrivals"]:
-            assert "minutes" in arrival
-            assert "occupancy" in arrival
-            assert "is_full" in arrival
-            assert arrival["is_full"] is False
-    
-    def test_parse_delayed_response(self, muni_source, delayed_api_response):
-        """Test parsing a response with delay status."""
-        result = muni_source._parse_response(delayed_api_response)
-        
-        assert result is not None
+        assert result["all_lines"]["is_delayed"] is False
+        assert RED_TILE not in result["formatted"]
+        assert RED_TILE not in result["all_lines"]["formatted"]
+
+    def test_delay_prefixes_the_red_tile(self, plugin):
+        visits = [_visit(minutes=7, Delay="PT5M"), _visit(minutes=15)]
+        result = plugin._parse_stop_data(visits, "15726")
         assert result["is_delayed"] is True
-        assert result["delay_description"] == "5 min delay"
-        assert result["color_code"] == COLOR_RED  # Red for delay
-        
-        # Formatted string should contain DELAY indicator
-        assert "(DELAY)" in result["formatted"]
-        assert "{63}" in result["formatted"]  # Red color code
-    
-    def test_parse_full_occupancy_response(self, muni_source, full_occupancy_response):
-        """Test parsing a response with FULL occupancy."""
-        result = muni_source._parse_response(full_occupancy_response)
-        
-        assert result is not None
-        assert len(result["arrivals"]) == 2
-        
-        # First arrival should be marked as full
-        assert result["arrivals"][0]["is_full"] is True
-        assert result["arrivals"][0]["occupancy"] == "FULL"
-        
-        # Second arrival should not be full
-        assert result["arrivals"][1]["is_full"] is False
-        
-        # Color should be orange for full (when no delay)
-        assert result["color_code"] == COLOR_ORANGE
-        
-        # Formatted string should have orange marker for full train
-        assert "{64}" in result["formatted"]  # Orange color code
-    
-    def test_parse_empty_response(self, muni_source):
-        """Test parsing an empty response."""
-        empty_response = {
-            "ServiceDelivery": {
-                "StopMonitoringDelivery": {
-                    "MonitoredStopVisit": []
-                }
-            }
-        }
-        
-        result = muni_source._parse_response(empty_response)
-        assert result is None
-    
-    def test_parse_list_format_response(self, muni_source, sample_api_response):
-        """Test parsing when StopMonitoringDelivery is a list."""
-        # Wrap in list format (511.org sometimes returns this)
-        sample_api_response["ServiceDelivery"]["StopMonitoringDelivery"] = [
-            sample_api_response["ServiceDelivery"]["StopMonitoringDelivery"]
-        ]
-        
-        result = muni_source._parse_response(sample_api_response)
-        assert result is not None
-        assert result["line"] == "N-JUDAH"
-    
-    def test_parse_list_field_values(self, muni_source):
-        """Test parsing when field values are lists (511.org quirk)."""
-        now = datetime.now(timezone.utc)
-        arrival1 = (now + timedelta(minutes=5)).isoformat()
-        
-        response = {
-            "ServiceDelivery": {
-                "StopMonitoringDelivery": {
-                    "MonitoredStopVisit": [
-                        {
-                            "MonitoredVehicleJourney": {
-                                "PublishedLineName": ["N"],  # List instead of string
-                                "Occupancy": ["MANY_SEATS"],  # List instead of string
-                                "MonitoredCall": {
-                                    "StopPointName": ["Church St & Duboce Ave"],
-                                    "ExpectedArrivalTime": arrival1,
-                                }
-                            }
-                        },
-                    ]
-                }
-            }
-        }
-        
-        result = muni_source._parse_response(response)
-        assert result is not None
+        assert result["formatted"] == f"{RED_TILE}N-JUDAH: 7, 15 MIN"
+        assert result["all_lines"]["formatted"] == f"{RED_TILE}N-JUDAH: 7, 15 MIN"
+
+    def test_a_situation_ref_counts_as_a_delay(self, plugin):
+        result = plugin._parse_stop_data([_visit(SituationRef={"SituationSimpleRef": "x"})], "15726")
+        assert result["is_delayed"] is True
+
+    def test_a_full_train_is_still_an_arrival(self, plugin):
+        visits = [_visit(minutes=3, occupancy="FULL"), _visit(minutes=10, occupancy="FEW_SEATS")]
+        result = plugin._parse_stop_data(visits, "15726")
+        assert result["formatted"] == "N-JUDAH: 3, 10 MIN"
+        assert result["all_lines"]["next_arrival"] == 3
+
+    def test_stop_name_comes_from_the_visits(self, plugin):
+        result = plugin._parse_stop_data([_visit(stop_name="Judah St & 9th Ave")], "15726")
+        assert result["stop_name"] == "Judah St & 9th Ave"
+
+    def test_stop_name_falls_back_to_the_stop_code(self, plugin):
+        result = plugin._parse_stop_data([_visit(stop_name="")], "15726")
+        assert result["stop_name"] == "15726"
+
+    def test_unwraps_list_valued_fields(self, plugin):
+        """511 sometimes wraps scalar fields in one-element lists."""
+        visits = [_visit(line=["N"], occupancy=["MANY_SEATS"], stop_name=["Church St & Duboce Ave"])]
+        result = plugin._parse_stop_data(visits, "15726")
         assert result["line"] == "N-JUDAH"
         assert result["stop_name"] == "Church St & Duboce Ave"
-    
-    def test_line_name_filter(self):
-        """Test line_name is stored on source.
-        
-        Note: The line_name filter is used for configuration but _parse_response
-        returns all lines for flexibility. Filtering can be done by callers
-        using the 'lines' dict in the result.
-        """
-        source_n = MuniSource(api_key="test", stop_codes=["15726"], line_name="N")
-        source_j = MuniSource(api_key="test", stop_codes=["15726"], line_name="J")
-        
-        assert source_n.line_name == "N"
-        assert source_j.line_name == "J"
-        
-        now = datetime.now(timezone.utc)
-        arrival = (now + timedelta(minutes=5)).isoformat()
-        
-        response = {
-            "ServiceDelivery": {
-                "StopMonitoringDelivery": {
-                    "MonitoredStopVisit": [
-                        {
-                            "MonitoredVehicleJourney": {
-                                "PublishedLineName": "N",
-                                "Occupancy": "MANY_SEATS",
-                                "MonitoredCall": {
-                                    "StopPointName": "Test Stop",
-                                    "ExpectedArrivalTime": arrival,
-                                }
-                            }
-                        },
-                    ]
-                }
-            }
-        }
-        
-        # parse_response returns all lines (filtering is done at higher level)
-        result_n = source_n._parse_response(response)
-        assert result_n is not None
-        assert result_n["line"] == "N-JUDAH"
-        
-        # Callers can use the 'lines' dict to filter by specific line
-        assert "N" in result_n["lines"]
 
-
-class TestMuniSourceFormatting:
-    """Tests for Muni display formatting."""
-    
-    @pytest.fixture
-    def muni_source(self):
-        return MuniSource(api_key="test", stop_codes=["15726"])
-    
-    def test_format_display_basic(self, muni_source):
-        """Test basic display formatting."""
-        arrivals = [
-            {"minutes": 4, "occupancy": "MANY_SEATS", "is_full": False},
-            {"minutes": 12, "occupancy": "FEW_SEATS", "is_full": False},
-            {"minutes": 19, "occupancy": "STANDING", "is_full": False},
-        ]
-        
-        result = muni_source._format_display("N", arrivals, is_delayed=False)
-        
-        assert "N-JUDAH" in result
-        assert "4" in result
-        assert "12" in result
-        assert "19" in result
-        assert "MIN" in result
-        assert "(DELAY)" not in result
-    
-    def test_format_display_with_delay(self, muni_source):
-        """Test display formatting with delay."""
-        arrivals = [
-            {"minutes": 7, "occupancy": "MANY_SEATS", "is_full": False},
-        ]
-        
-        result = muni_source._format_display("N", arrivals, is_delayed=True)
-        
-        assert "(DELAY)" in result
-        assert "{63}" in result  # Red color code
-    
-    def test_format_display_with_full_train(self, muni_source):
-        """Test display formatting with full train."""
-        arrivals = [
-            {"minutes": 3, "occupancy": "FULL", "is_full": True},
-            {"minutes": 10, "occupancy": "FEW_SEATS", "is_full": False},
-        ]
-        
-        result = muni_source._format_display("N", arrivals, is_delayed=False)
-        
-        # Full train time should have orange marker
-        assert "{64}3" in result
-        # Non-full train time should not have marker
-        assert ", 10 " in result or ", 10 MIN" in result
-    
-    def test_get_display_line_name(self, muni_source):
-        """Test line name display mapping."""
-        assert muni_source._get_display_line_name("N") == "N-JUDAH"
-        assert muni_source._get_display_line_name("J") == "J-CHURCH"
-        assert muni_source._get_display_line_name("K") == "K-INGLESIDE"
-        assert muni_source._get_display_line_name("L") == "L-TARAVAL"
-        assert muni_source._get_display_line_name("M") == "M-OCEAN VIEW"
-        assert muni_source._get_display_line_name("T") == "T-THIRD"
-        assert muni_source._get_display_line_name("F") == "F-MARKET"
-        # Unknown line should return as-is
-        assert muni_source._get_display_line_name("X") == "X"
-    
-    def test_format_delay_duration(self, muni_source):
-        """Test delay duration formatting."""
-        assert muni_source._format_delay("PT5M") == "5 min delay"
-        assert muni_source._format_delay("PT2M30S") == "2 min delay"
-        assert muni_source._format_delay("PT10M") == "10 min delay"
-        assert muni_source._format_delay("PT0M") == "Delayed"
-        assert muni_source._format_delay("invalid") == "Delayed"
-
-
-class TestMuniSourceAPI:
-    """Tests for Muni API interactions with transit cache."""
-    
-    @pytest.fixture
-    def muni_source(self):
-        return MuniSource(api_key="test_key", stop_codes=["15726"], line_name="N")
-    
-    @pytest.fixture
-    def mock_cache_visits(self):
-        """Mock transit cache visits for testing."""
-        now = datetime.now(timezone.utc)
-        arrival = (now + timedelta(minutes=5)).isoformat()
-        
-        return [
+    def test_falls_back_to_departure_then_aimed_time(self, plugin):
+        soon = (datetime.now(timezone.utc) + timedelta(minutes=6, seconds=30)).isoformat()
+        later = (datetime.now(timezone.utc) + timedelta(minutes=9, seconds=30)).isoformat()
+        visits = [
             {
                 "MonitoredVehicleJourney": {
                     "PublishedLineName": "N",
-                    "Occupancy": "MANY_SEATS",
-                    "MonitoredCall": {
-                        "StopPointName": "Test Stop",
-                        "ExpectedArrivalTime": arrival,
-                    }
+                    "MonitoredCall": {"StopPointName": "Test", "ExpectedDepartureTime": soon},
                 }
-            }
-        ]
-    
-    @patch('src.utils.muni.get_transit_cache')
-    def test_fetch_arrivals_success(self, mock_get_cache, muni_source, mock_cache_visits):
-        """Test successful fetch from transit cache."""
-        # Mock cache
-        mock_cache = Mock()
-        mock_cache.is_ready.return_value = True
-        mock_cache.get_stops_data.return_value = {"15726": mock_cache_visits}
-        mock_get_cache.return_value = mock_cache
-        
-        result = muni_source.fetch_arrivals()
-        
-        assert result is not None
-        assert result["line"] == "N-JUDAH"
-        mock_cache.get_stops_data.assert_called_once_with("SF", ["15726"])
-    
-    @patch('src.utils.muni.get_transit_cache')
-    def test_fetch_arrivals_cache_not_ready(self, mock_get_cache, muni_source):
-        """Test handling when cache is not ready."""
-        # Mock cache not ready
-        mock_cache = Mock()
-        mock_cache.is_ready.return_value = False
-        mock_get_cache.return_value = mock_cache
-        
-        result = muni_source.fetch_arrivals()
-        
-        assert result is None
-    
-    @patch('src.utils.muni.get_transit_cache')
-    def test_fetch_arrivals_no_data_in_cache(self, mock_get_cache, muni_source):
-        """Test handling when stop has no data in cache."""
-        # Mock cache with no data for stop
-        mock_cache = Mock()
-        mock_cache.is_ready.return_value = True
-        mock_cache.get_stops_data.return_value = {"15726": []}
-        mock_get_cache.return_value = mock_cache
-        
-        result = muni_source.fetch_arrivals()
-        
-        assert result is None
-    
-    @patch('src.utils.muni.get_transit_cache')
-    def test_fetch_multiple_stops(self, mock_get_cache, mock_cache_visits):
-        """Test fetching multiple stops from cache."""
-        now = datetime.now(timezone.utc)
-        arrival2 = (now + timedelta(minutes=8)).isoformat()
-        
-        mock_cache_visits_stop2 = [
+            },
             {
                 "MonitoredVehicleJourney": {
                     "PublishedLineName": "N",
-                    "Occupancy": "FEW_SEATS",
-                    "MonitoredCall": {
-                        "StopPointName": "Test Stop 2",
-                        "ExpectedArrivalTime": arrival2,
-                    }
+                    "MonitoredCall": {"StopPointName": "Test", "AimedArrivalTime": later},
                 }
-            }
+            },
         ]
-        
-        # Mock cache with multiple stops
-        mock_cache = Mock()
-        mock_cache.is_ready.return_value = True
-        mock_cache.get_stops_data.return_value = {
-            "15726": mock_cache_visits,
-            "15727": mock_cache_visits_stop2
-        }
-        mock_get_cache.return_value = mock_cache
-        
-        source = MuniSource(api_key="test", stop_codes=["15726", "15727"])
-        results = source.fetch_multiple_stops()
-        
-        assert len(results) == 2
-        assert results[0]["stop_code"] == "15726"
-        assert results[1]["stop_code"] == "15727"
+        result = plugin._parse_stop_data(visits, "15726")
+        assert result["formatted"] == "N-JUDAH: 6, 9 MIN"
+
+    def test_a_visit_with_an_unreadable_time_is_dropped(self, plugin):
+        visits = [_visit(minutes=4)]
+        visits[0]["MonitoredVehicleJourney"]["MonitoredCall"]["ExpectedArrivalTime"] = "not a time"
+        assert plugin._parse_stop_data(visits, "15726") is None
 
 
-class TestGetMuniSource:
-    """Tests for get_muni_source factory function."""
-    
-    @patch('src.utils.muni.Config')
-    def test_get_muni_source_configured(self, mock_config):
-        """Test getting source when properly configured."""
-        mock_config.MUNI_API_KEY = "test_key"
-        mock_config.MUNI_STOP_CODES = ["15726"]
-        mock_config.MUNI_STOP_CODE = ""  # Empty fallback
-        mock_config.MUNI_LINE_NAME = "N"
-        mock_config.TRANSIT_CACHE_REFRESH_SECONDS = 90
-        mock_config.TRANSIT_CACHE_ENABLED = False  # Disable cache for test
-        
-        source = get_muni_source()
-        
-        assert source is not None
-        assert source.api_key == "test_key"
-        assert source.stop_codes == ["15726"]
-        assert source.line_name == "N"
-    
-    @patch('src.utils.muni.Config')
-    def test_get_muni_source_no_api_key(self, mock_config):
-        """Test getting source without API key."""
-        mock_config.MUNI_API_KEY = ""
-        mock_config.MUNI_STOP_CODES = ["15726"]
-        mock_config.MUNI_STOP_CODE = ""
-        
-        source = get_muni_source()
-        
-        assert source is None
-    
-    @patch('src.utils.muni.Config')
-    def test_get_muni_source_no_stop_code(self, mock_config):
-        """Test getting source without stop code returns source with empty stops.
-        
-        The source is returned even without stops so template variables
-        are available in the UI.
-        """
-        mock_config.MUNI_API_KEY = "test_key"
-        mock_config.MUNI_STOP_CODES = []
-        mock_config.MUNI_STOP_CODE = ""
-        mock_config.MUNI_LINE_NAME = ""
-        mock_config.TRANSIT_CACHE_REFRESH_SECONDS = 90
-        mock_config.TRANSIT_CACHE_ENABLED = False
-        
-        source = get_muni_source()
-        
-        # Source is returned even without stops for UI template variable access
-        assert source is not None
-        assert source.stop_codes == []
-    
-    @patch('src.utils.muni.Config')
-    def test_get_muni_source_no_line_filter(self, mock_config):
-        """Test getting source without line filter."""
-        mock_config.MUNI_API_KEY = "test_key"
-        mock_config.MUNI_STOP_CODES = ["15726"]
-        mock_config.MUNI_STOP_CODE = ""
-        mock_config.MUNI_LINE_NAME = ""
-        mock_config.TRANSIT_CACHE_REFRESH_SECONDS = 90
-        mock_config.TRANSIT_CACHE_ENABLED = False
-        
-        source = get_muni_source()
-        
-        assert source is not None
-        assert source.line_name is None
+class TestTransitCacheWiring:
+    """How the plugin configures and uses the platform's shared transit cache.
 
+    ``_get_transit_cache`` imports ``get_transit_cache`` lazily, so the patch
+    target is the source module rather than ``plugins.muni``.
+    """
 
-class TestMuniTimeParsing:
-    """Tests for time parsing and calculation."""
-    
+    CACHE_FACTORY = "src.utils.transit_cache.get_transit_cache"
+
     @pytest.fixture
-    def muni_source(self):
-        return MuniSource(api_key="test", stop_codes=["15726"])
-    
-    def test_calculate_minutes_until_future(self, muni_source):
-        """Test calculating minutes for future arrival."""
-        now = datetime.now(timezone.utc)
-        future = now + timedelta(minutes=10)
-        
-        minutes = muni_source._calculate_minutes_until(future.isoformat())
-        
-        # Allow some margin for test execution time
-        assert 9 <= minutes <= 11
-    
-    def test_calculate_minutes_until_past(self, muni_source):
-        """Test calculating minutes for past time (should return 0)."""
-        now = datetime.now(timezone.utc)
-        past = now - timedelta(minutes=5)
-        
-        minutes = muni_source._calculate_minutes_until(past.isoformat())
-        
-        assert minutes == 0
-    
-    def test_calculate_minutes_until_with_z_timezone(self, muni_source):
-        """Test parsing ISO timestamp with Z timezone."""
-        now = datetime.now(timezone.utc)
-        future = now + timedelta(minutes=15)
-        # Format with Z instead of +00:00
-        timestamp = future.strftime("%Y-%m-%dT%H:%M:%SZ")
-        
-        minutes = muni_source._calculate_minutes_until(timestamp)
-        
-        assert 14 <= minutes <= 16
-    
-    def test_calculate_minutes_until_invalid(self, muni_source):
-        """Test handling invalid timestamp."""
-        minutes = muni_source._calculate_minutes_until("not a timestamp")
-        
-        assert minutes is None
+    def plugin(self):
+        plugin = MuniPlugin(MANIFEST)
+        plugin.config = {"api_key": "test_key", "stop_codes": ["15726"]}
+        return plugin
 
+    def test_configures_the_cache_with_the_api_key(self, plugin):
+        cache = _ready_cache({})
+        with patch(self.CACHE_FACTORY, return_value=cache):
+            plugin.fetch_data()
+        cache.configure.assert_called_once_with(api_key="test_key", refresh_interval=90, enabled=True)
 
-class TestMuniFormatter:
-    """Tests for Muni message formatter."""
-    
-    def test_format_muni_basic(self):
-        """Test basic muni formatting."""
-        from src.formatters.message_formatter import MessageFormatter
-        
-        formatter = MessageFormatter()
-        muni_data = {
-            "line": "N-JUDAH",
-            "stop_name": "Church & Duboce",
-            "arrivals": [
-                {"minutes": 4, "occupancy": "MANY_SEATS", "is_full": False},
-                {"minutes": 12, "occupancy": "FEW_SEATS", "is_full": False},
-            ],
-            "is_delayed": False,
-            "delay_description": "",
-        }
-        
-        result = formatter.format_muni(muni_data)
-        
-        assert "MUNI" in result
-        assert "N-JUDAH" in result
-        assert "4" in result
-        assert "12" in result
-    
-    def test_format_muni_with_delay(self):
-        """Test muni formatting with delay."""
-        from src.formatters.message_formatter import MessageFormatter
-        
-        formatter = MessageFormatter()
-        muni_data = {
-            "line": "N-JUDAH",
-            "stop_name": "Church & Duboce",
-            "arrivals": [
-                {"minutes": 7, "occupancy": "MANY_SEATS", "is_full": False},
-            ],
-            "is_delayed": True,
-            "delay_description": "5 min delay",
-        }
-        
-        result = formatter.format_muni(muni_data)
-        
-        assert "{red}" in result
-        assert "(DELAY)" in result
-    
-    def test_format_muni_with_full_train(self):
-        """Test muni formatting with full occupancy."""
-        from src.formatters.message_formatter import MessageFormatter
-        
-        formatter = MessageFormatter()
-        muni_data = {
-            "line": "N-JUDAH",
-            "stop_name": "Church & Duboce",
-            "arrivals": [
-                {"minutes": 3, "occupancy": "FULL", "is_full": True},
-            ],
-            "is_delayed": False,
-            "delay_description": "",
-        }
-        
-        result = formatter.format_muni(muni_data)
-        
-        assert "{orange}" in result
-    
-    def test_format_muni_empty(self):
-        """Test formatting empty muni data."""
-        from src.formatters.message_formatter import MessageFormatter
-        
-        formatter = MessageFormatter()
-        
-        result = formatter.format_muni(None)
-        
-        assert "No arrivals" in result
+    def test_refresh_seconds_sets_the_cache_refresh_interval(self, plugin):
+        plugin.config = {"api_key": "test_key", "stop_codes": ["15726"], "refresh_seconds": 120}
+        cache = _ready_cache({})
+        with patch(self.CACHE_FACTORY, return_value=cache):
+            plugin.fetch_data()
+        assert cache.configure.call_args.kwargs["refresh_interval"] == 120
+
+    def test_starts_a_cache_that_is_not_ready(self, plugin):
+        cache = Mock()
+        cache.is_ready.return_value = False
+        with patch(self.CACHE_FACTORY, return_value=cache):
+            result = plugin.fetch_data()
+        cache.start.assert_called_once_with()
+        assert not result.available
+        assert result.error == "Transit cache not ready"
+
+    def test_does_not_restart_a_ready_cache(self, plugin):
+        cache = _ready_cache({})
+        with patch(self.CACHE_FACTORY, return_value=cache):
+            plugin.fetch_data()
+        cache.start.assert_not_called()
+
+    def test_reuses_the_cache_across_fetches(self, plugin):
+        cache = _ready_cache({})
+        with patch(self.CACHE_FACTORY, return_value=cache) as factory:
+            plugin.fetch_data()
+            plugin.fetch_data()
+        assert factory.call_count == 1
+        assert cache.configure.call_count == 1
+
+    def test_cache_setup_failure_is_reported_not_raised(self, plugin):
+        with patch(self.CACHE_FACTORY, side_effect=RuntimeError("no 511 credentials")):
+            result = plugin.fetch_data()
+        assert not result.available
+        assert result.error == "Transit cache not available"
+
+    def test_asks_the_cache_for_the_configured_stops(self, plugin):
+        cache = _ready_cache({"15726": [_visit()]})
+        with patch(self.CACHE_FACTORY, return_value=cache):
+            plugin.fetch_data()
+        cache.get_stops_data.assert_called_once_with("SF", ["15726"])
+
+    def test_arrivals_from_the_cache_reach_the_result(self, plugin):
+        cache = _ready_cache({"15726": [_visit(stop_name="Test Stop", minutes=5)]})
+        with patch(self.CACHE_FACTORY, return_value=cache):
+            result = plugin.fetch_data()
+        assert result.available
+        assert result.data["line"] == "N-JUDAH"
+        assert result.data["stop_name"] == "Test Stop"
+        assert result.data["formatted"] == "N-JUDAH: 5 MIN"
 
 
 class TestMuniPluginClass:
@@ -697,9 +257,23 @@ class TestMuniPluginClass:
     def test_normalize_line_code_unknown(self, plugin):
         assert plugin._normalize_line_code("XY") == "XY"
 
-    def test_get_display_line_name(self, plugin):
-        assert plugin._get_display_line_name("N") == "N-JUDAH"
-        assert plugin._get_display_line_name("Z") == "Z"
+    @pytest.mark.parametrize(
+        "code,name",
+        [
+            ("N", "N-JUDAH"),
+            ("J", "J-CHURCH"),
+            ("K", "K-INGLESIDE"),
+            ("L", "L-TARAVAL"),
+            ("M", "M-OCEAN VIEW"),
+            ("T", "T-THIRD"),
+            ("S", "S-SHUTTLE"),
+            ("F", "F-MARKET"),
+            ("n", "N-JUDAH"),
+            ("Z", "Z"),
+        ],
+    )
+    def test_get_display_line_name(self, plugin, code, name):
+        assert plugin._get_display_line_name(code) == name
 
     def test_calculate_minutes_until_future(self, plugin):
         ts = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
@@ -765,7 +339,8 @@ class TestMuniPluginClass:
             }
         }]
         result = plugin._parse_stop_data(visits, "15726")
-        assert result is not None
+        assert result["line"] == "N-JUDAH"
+        assert result["stop_name"] == "Test Stop"
 
     def test_parse_stop_data_delayed(self, plugin):
         now = datetime.now(timezone.utc)
@@ -795,21 +370,6 @@ class TestMuniPluginClass:
             }
         }]
         assert plugin._parse_stop_data(visits, "15726") is None
-
-    def test_parse_stop_data_full_occupancy(self, plugin):
-        now = datetime.now(timezone.utc)
-        visits = [{
-            "MonitoredVehicleJourney": {
-                "PublishedLineName": "N",
-                "Occupancy": "FULL",
-                "MonitoredCall": {
-                    "StopPointName": "Test",
-                    "ExpectedArrivalTime": (now + timedelta(minutes=5)).isoformat(),
-                }
-            }
-        }]
-        result = plugin._parse_stop_data(visits, "15726")
-        assert result is not None
 
     def test_fetch_data_no_stops(self, plugin):
         plugin._config = {}

@@ -253,25 +253,6 @@ TRANSIT_CACHE_ENABLED=true
 TRANSIT_CACHE_REFRESH_SECONDS=90  # Default: 90
 ```
 
-### Monitoring Cache Health
-
-Check cache status via API:
-```bash
-curl http://localhost:4420/api/transit/cache/status
-```
-
-Returns:
-```json
-{
-  "last_refresh": 1234567890,
-  "cache_age_seconds": 45,
-  "is_stale": false,
-  "agencies_cached": 10,
-  "refresh_count": 156,
-  "error_count": 0
-}
-```
-
 ## Tips and Best Practices
 
 ### Choosing Stops
@@ -349,7 +330,7 @@ Use short, recognizable names:
 **Problem:** Arrival predictions seem old
 
 **Solutions:**
-1. **Check cache age**: Use cache status endpoint
+1. **Check cache age**: Look for transit cache refreshes in the application log
 2. **Verify refresh interval**: Check MUNI_REFRESH_SECONDS
 3. **Check logs**: Look for cache refresh errors
 4. **Restart service**: Containers might need restart
@@ -410,24 +391,6 @@ Outbound: {{muni.stops.1.formatted}}
 # Display different stops based on time of day
 # Morning: Show stops near home
 # Evening: Show stops near work
-```
-
-## API Reference
-
-### REST API Endpoints
-
-```bash
-# List all Muni stops (cached, 24hr TTL)
-GET /muni/stops
-
-# Find stops near location
-GET /muni/stops/nearby?lat=40.7128&lng=-74.0060&radius=0.5
-
-# Search stops by address
-GET /muni/stops/search?address=Market+St+and+9th+St&radius=0.5
-
-# Get transit cache status
-GET /transit/cache/status
 ```
 
 ## Line Codes Reference

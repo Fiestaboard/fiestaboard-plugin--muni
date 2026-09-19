@@ -1,153 +1,76 @@
-"""Tests for MUNI nested line structure."""
+"""Tests for MuniPlugin's nested per-line data.
+
+Templates reach this data as ``{{muni.stops.0.lines.N.formatted}}`` and
+``{{muni.stops.0.all_lines.formatted}}``; the older flat variables
+(``{{muni.line}}``, ``{{muni.formatted}}``) keep working because they mirror
+the first line of the first stop. Rendering itself belongs to the platform's
+template engine, which is not a plugin API, so these tests pin the *shape*
+the plugin produces rather than render it.
+"""
+
+from datetime import datetime, timedelta, timezone
+from unittest.mock import Mock, patch
 
 import pytest
-from src.utils.muni import MuniSource
-from src.templates.engine import TemplateEngine
+
+from plugins.muni import MuniPlugin
 
 
-class TestMuniLineNormalization:
-    """Test line code normalization."""
-    
-    def test_normalize_judah_to_n(self):
-        """Test JUDAH normalizes to N."""
-        source = MuniSource(api_key="test", stop_codes=["15210"])
-        assert source._normalize_line_code("JUDAH") == "N"
-        assert source._normalize_line_code("N-JUDAH") == "N"
-        assert source._normalize_line_code("N") == "N"
-    
-    def test_normalize_church_to_j(self):
-        """Test CHURCH normalizes to J."""
-        source = MuniSource(api_key="test", stop_codes=["15210"])
-        assert source._normalize_line_code("CHURCH") == "J"
-        assert source._normalize_line_code("J-CHURCH") == "J"
-        assert source._normalize_line_code("J") == "J"
-    
-    def test_normalize_other_lines(self):
-        """Test other line normalizations."""
-        source = MuniSource(api_key="test", stop_codes=["15210"])
-        assert source._normalize_line_code("TARAVAL") == "L"
-        assert source._normalize_line_code("OCEAN VIEW") == "M"
-        assert source._normalize_line_code("KT") == "KT"  # Already normalized
+def _visit(line, minutes, stop_name="Judah & 34th"):
+    # Half a minute of slack: the plugin truncates, so a stamp made a few
+    # milliseconds before the assertion would otherwise read one minute short.
+    arrival = (datetime.now(timezone.utc) + timedelta(minutes=minutes, seconds=30)).isoformat()
+    return {
+        "MonitoredVehicleJourney": {
+            "PublishedLineName": line,
+            "MonitoredCall": {"StopPointName": stop_name, "ExpectedArrivalTime": arrival},
+        }
+    }
+
+
+@pytest.fixture
+def plugin():
+    return MuniPlugin({"id": "muni", "name": "SF Muni", "version": "1.0.0"})
+
+
+@pytest.fixture
+def two_line_stop(plugin):
+    """N arrivals at 5 and 15 minutes, a J arrival at 8, at one stop."""
+    visits = [_visit("N", 5), _visit("J", 8), _visit("N", 15)]
+    return plugin._parse_stop_data(visits, "15210")
 
 
 class TestNestedLineStructure:
-    """Test nested line data structure in templates."""
-    
-    def test_nested_line_variables(self):
-        """Test accessing nested line variables."""
-        engine = TemplateEngine()
-        
-        context = {
-            "muni": {
-                "stops": [
-                    {
-                        "stop_code": "15210",
-                        "stop_name": "Judah & 34th",
-                        "lines": {
-                            "N": {
-                                "line": "N-JUDAH",
-                                "formatted": "N: 5, 15, 25 min",
-                                "next_arrival": 5,
-                                "is_delayed": False
-                            },
-                            "J": {
-                                "line": "J-CHURCH",
-                                "formatted": "J: 8, 18 min",
-                                "next_arrival": 8,
-                                "is_delayed": False
-                            }
-                        },
-                        "all_lines": {
-                            "formatted": "N/J: 5, 8, 15 min",
-                            "next_arrival": 5
-                        }
-                    }
-                ]
-            }
-        }
-        
-        # Test N line access
-        result = engine.render("{{muni.stops.0.lines.N.formatted}}", context)
-        assert "N: 5, 15, 25 min" in result
-        
-        # Test J line access
-        result = engine.render("{{muni.stops.0.lines.J.formatted}}", context)
-        assert "J: 8, 18 min" in result
-        
-        # Test all_lines access
-        result = engine.render("{{muni.stops.0.all_lines.formatted}}", context)
-        assert "N/J: 5, 8, 15 min" in result
-        
-        # Test next_arrival
-        result = engine.render("{{muni.stops.0.lines.N.next_arrival}}", context)
-        assert "5" in result
-    
-    def test_multi_line_template(self):
-        """Test complete template with nested lines."""
-        engine = TemplateEngine()
-        
-        context = {
-            "muni": {
-                "stops": [
-                    {
-                        "stop_name": "Church & Duboce",
-                        "lines": {
-                            "N": {"formatted": "N: 5, 15 min", "next_arrival": 5},
-                            "J": {"formatted": "J: 8, 18 min", "next_arrival": 8}
-                        },
-                        "all_lines": {"formatted": "N/J: 5, 8 min"}
-                    }
-                ]
-            }
-        }
-        
-        template = [
-            "{center}MUNI TIMES",
-            "N: {{muni.stops.0.lines.N.next_arrival}}m",
-            "J: {{muni.stops.0.lines.J.next_arrival}}m",
-            "",
-            "All: {{muni.stops.0.all_lines.formatted}}",
-            ""
-        ]
-        
-        result = engine.render_lines(template, context)
-        lines = result.split('\n')
-        
-        assert "MUNI TIMES" in lines[0]
-        assert "N: 5m" in lines[1]
-        assert "J: 8m" in lines[2]
-        assert "N/J: 5, 8 min" in lines[4]
-    
-    def test_backward_compatibility(self):
-        """Test that old variables still work."""
-        engine = TemplateEngine()
-        
-        context = {
-            "muni": {
-                "stops": [
-                    {
-                        "line": "N-JUDAH",
-                        "formatted": "N: 5, 15 min",
-                        "lines": {
-                            "N": {"formatted": "N: 5, 15 min"}
-                        }
-                    }
-                ],
-                "line": "N-JUDAH",
-                "formatted": "N: 5, 15 min"
-            }
-        }
-        
-        # Old top-level variables should still work
-        result = engine.render("{{muni.line}}", context)
-        assert "N-JUDAH" in result
-        
-        result = engine.render("{{muni.formatted}}", context)
-        assert "N: 5, 15 min" in result
-        
-        # Old stop-level variables should still work
-        result = engine.render("{{muni.stops.0.formatted}}", context)
-        assert "N: 5, 15 min" in result
+    def test_each_line_is_addressable_by_its_code(self, two_line_stop):
+        lines = two_line_stop["lines"]
+        assert set(lines) == {"N", "J"}
+        assert lines["N"]["line"] == "N-JUDAH"
+        assert lines["N"]["formatted"] == "N-JUDAH: 5, 15 MIN"
+        assert lines["N"]["next_arrival"] == 5
+        assert lines["J"]["formatted"] == "J-CHURCH: 8 MIN"
+        assert lines["J"]["next_arrival"] == 8
 
+    def test_all_lines_merges_every_line_in_arrival_order(self, two_line_stop):
+        all_lines = two_line_stop["all_lines"]
+        assert all_lines["formatted"] == "J-CHURCH/N-JUDAH: 5, 8, 15 MIN"
+        assert all_lines["next_arrival"] == 5
+        assert all_lines["is_delayed"] is False
 
+    def test_flat_stop_variables_mirror_the_first_line(self, two_line_stop):
+        """Line codes are sorted, so J comes before N here."""
+        assert two_line_stop["line"] == "J-CHURCH"
+        assert two_line_stop["formatted"] == two_line_stop["lines"]["J"]["formatted"]
+        assert two_line_stop["is_delayed"] is False
 
+    def test_flat_top_level_variables_mirror_the_first_stop(self, plugin):
+        plugin.config = {"api_key": "k", "stop_codes": ["15210"]}
+        cache = Mock()
+        cache.is_ready.return_value = True
+        cache.get_stops_data.return_value = {"15210": [_visit("N", 5), _visit("N", 15)]}
+        with patch.object(plugin, "_get_transit_cache", return_value=cache):
+            data = plugin.fetch_data().data
+
+        stop = data["stops"][0]
+        assert data["line"] == stop["line"] == "N-JUDAH"
+        assert data["formatted"] == stop["formatted"] == stop["lines"]["N"]["formatted"]
+        assert data["formatted"] == "N-JUDAH: 5, 15 MIN"
